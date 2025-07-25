@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+
 import numpy as np
 import math
 import rclpy
@@ -9,21 +10,24 @@ from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand
 from line_interfaces.msg import Line
 import tf_transformations as tft
 
+
 #############
 # CONSTANTS #
 #############
-_RATE = 10 # (Hz) rate for rospy.rate
-_MAX_SPEED = 1.5 # (m/s)
-_MAX_CLIMB_RATE = 1.0 # m/s
-_MAX_ROTATION_RATE = 5.0 # rad/s 
+_RATE = 10  # (Hz) rate for rospy.rate
+_MAX_SPEED = 1.5  # (m/s)
+_MAX_CLIMB_RATE = 1.0  # m/s
+_MAX_ROTATION_RATE = 5.0  # rad/s
 IMAGE_HEIGHT = 960
 IMAGE_WIDTH = 1280
-CENTER = np.array([IMAGE_WIDTH//2, IMAGE_HEIGHT//2]) # Center of the image frame. We will treat this as the center of mass of the drone
-EXTEND = 300 # Number of pixels forward to extrapolate the line
-KP_X = None
-KP_Y = None
-KP_Z_W = None # Proportional gains for x, y, and angular velocity control
+# Center of the image frame. We will treat this as the center of mass of the drone
+CENTER = np.array([IMAGE_WIDTH//2, IMAGE_HEIGHT//2])
+EXTEND = 300  # Number of pixels forward to extrapolate the line
+KP_X = 0.015
+KP_Y = 0.015
+KP_Z_W = 0.05  # Proportional gains for x, y, and angular velocity control
 DISPLAY = True
+
 
 #########################
 # COORDINATE TRANSFORMS #
@@ -38,7 +42,7 @@ class CoordTransforms():
             - p_x_y__z: position of "x" frame relative to "y" frame expressed in "z" coordinates
             - v_x_y__z: velocity of "x" frame with relative to "y" frame expressed in "z" coordinates
             - R_x2y: rotation matrix that maps vector represented in frame "x" to representation in frame "y" (right-multiply column vec)
-    
+
         Frame Subscripts:
             - m = marker frame (x-right, y-up, z-out when looking at marker)
             - dc = downward-facing camera (if expressed in the body frame)
@@ -52,94 +56,104 @@ class CoordTransforms():
                           [    rotation   0.0]
                           [     matrix    0.0]
                           [0.0, 0.0, 0.0, 0.0]])
-            
+
             [[ x']      [[       3x3     0.0]  [[ x ]
              [ y']  =    [    rotation   0.0]   [ y ]
              [ z']       [     matrix    0.0]   [ z ]
              [0.0]]      [0.0, 0.0, 0.0, 0.0]]  [0.0]]
         """
-        
+
         # Reference frames
-        self.COORDINATE_FRAMES = {'lenu','lned','bu','bd','dc','fc'}
-    
+        self.COORDINATE_FRAMES = {'lenu', 'lned', 'bu', 'bd', 'dc', 'fc'}
+
         self.WORLD_FRAMES = {'lenu', 'lned'}
-    
+
         self.BODY_FRAMES = {'bu', 'bd', 'dc', 'fc'}
-    
+
         self.STATIC_TRANSFORMS = {'R_lenu2lenu',
                                   'R_lenu2lned',
-    
+
                                   'R_lned2lenu',
-                                  'R_lned2lned', 
-          
-                                  'R_bu2bu', 
+                                  'R_lned2lned',
+
+                                  'R_bu2bu',
                                   'R_bu2bd',
                                   'R_bu2dc',
                                   'R_bu2fc',
-          
+
                                   'R_bd2bu',
                                   'R_bd2bd',
                                   'R_bd2dc',
                                   'R_bd2fc',
-          
+
                                   'R_dc2bu',
                                   'R_dc2bd',
                                   'R_dc2dc',
                                   'R_dc2fc',
-    
+                                  'R_dc2lned',
+
                                   'R_fc2bu',
                                   'R_fc2bd',
                                   'R_fc2dc',
                                   'R_fc2fc'
                                   }
-       
+
         self.R_dc2bd = np.array([
-            [0.0, -1.0, 0.0, 0.0], # bd.x = -dc.y
+            [0.0, -1.0, 0.0, 0.0],  # bd.x = -dc.y
             [1.0, 0.0, 0.0, 0.0],  # bd.y = dc.x
             [0.0, 0.0, 1.0, 0.0],  # bd.z = dc.z
             [0.0, 0.0, 0.0, 0.0]
         ])
-    
-    
+
+        self.R_dc2lned = np.array([
+            [1.0, 0.0, 0.0, 0.0],  # lned.x = dc.x
+            [0.0, 1.0, 0.0, 0.0],  # lned.y = dc.y
+            [0.0, 0.0, 1.0, 0.0],  # lned.z = dc.z
+            [0.0, 0.0, 0.0, 0.0]
+        ])
+
     def static_transform(self, v__fin, fin, fout):
         """
         Given a vector expressed in frame fin, returns the same vector expressed in fout.
-            
+
             Args:
-                - v__fin: 3D vector, (x, y, z), represented in fin coordinates 
-                - fin: string describing input coordinate frame 
-                - fout: string describing output coordinate frame 
-        
+                - v__fin: 3D vector, (x, y, z), represented in fin coordinates
+                - fin: string describing input coordinate frame
+                - fout: string describing output coordinate frame
+
             Returns
                 - v__fout: a vector, (x, y, z) represent in fout coordinates
         """
         # Check if fin is a valid coordinate frame
         if fin not in self.COORDINATE_FRAMES:
-            raise AttributeError('{} is not a valid coordinate frame'.format(fin))
+            raise AttributeError(
+                '{} is not a valid coordinate frame'.format(fin))
 
         # Check if fout is a valid coordinate frame
         if fout not in self.COORDINATE_FRAMES:
-            raise AttributeError('{} is not a valid coordinate frame'.format(fout))
-        
+            raise AttributeError(
+                '{} is not a valid coordinate frame'.format(fout))
+
         # Check for a static transformation exists between the two frames
         R_str = 'R_{}2{}'.format(fin, fout)
         if R_str not in self.STATIC_TRANSFORMS:
-            raise AttributeError('No static transform exists from {} to {}.'.format(fin, fout))
-        
+            raise AttributeError(
+                'No static transform exists from {} to {}.'.format(fin, fout))
+
         # v4__'' are 4x1 np.array representation of the vector v__''
         # Create a 4x1 np.array representation of v__fin for matrix multiplication
         v4__fin = np.array([[v__fin[0]],
                             [v__fin[1]],
                             [v__fin[2]],
-                            [     0.0]])
+                            [0.0]])
 
         # Get rotation matrix
         R_fin2fout = getattr(self, R_str)
 
         # Perform transformation from v__fin to v__fout
         v4__fout = np.dot(R_fin2fout, v4__fin)
-        
-        return (v4__fout[0,0], v4__fout[1,0], v4__fout[2,0])
+
+        return (v4__fout[0, 0], v4__fout[1, 0], v4__fout[2, 0])
 
 
 class LineController(Node):
@@ -148,6 +162,10 @@ class LineController(Node):
 
         # Create CoordTransforms instance
         self.coord_transforms = CoordTransforms()
+
+        # Store initial ground plane offset
+        self.initial_d_x = None
+        self.initial_d_y = None
 
         # Configure QoS profile for publishing and subscribing
         qos_profile = QoSProfile(
@@ -225,29 +243,15 @@ class LineController(Node):
         self.get_logger().info("Switching to land mode")
 
     def publish_offboard_control_heartbeat_signal(self):
-        """Publish the offboard control mode."""
+        """Publish the offboard OffboardControlModecontrol mode."""
         msg = OffboardControlMode()
         msg.position = True
         msg.velocity = True
         msg.acceleration = False
         msg.attitude = False
-        msg.body_rate = True
+        msg.body_rate = False
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.offboard_control_mode_publisher.publish(msg)
-
-    def publish_trajectory_setpoint(self, vx: float, vy: float, wz: float) -> None:
-        """Publish the trajectory setpoint."""
-        msg = TrajectorySetpoint()
-        msg.position = [None, None, self.takeoff_height]
-        if self.offboard_setpoint_counter < 100:
-            msg.velocity = [0.0, 0.0, 0.0]
-        else:
-            msg.velocity = [vx, vy, 0.0]
-        msg.acceleration = [None, None, None]
-        msg.yawspeed = wz
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        self.trajectory_setpoint_publisher.publish(msg)
-        # self.get_logger().info(f"Publishing velocity setpoints {[vx, vy, wz]}")
 
     def publish_vehicle_command(self, command, **params) -> None:
         """Publish a vehicle command."""
@@ -268,79 +272,86 @@ class LineController(Node):
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.vehicle_command_publisher.publish(msg)
 
-    def convert_velocity_setpoints(self):
-        # Set linear velocity (convert command velocity from downward camera frame to bd frame)
-        vx, vy, vz = self.coord_transforms.static_transform((self.vx__dc, self.vy__dc, self.vz__dc), 'dc', 'bd')
-
-        # Set angular velocity (convert command angular velocity from downward camera to bd frame)
-        _, _, wz = self.coord_transforms.static_transform((0.0, 0.0, self.wz__dc), 'dc', 'bd')
-
-        # enforce safe velocity limits
-        if _MAX_SPEED < 0.0 or _MAX_CLIMB_RATE < 0.0 or _MAX_ROTATION_RATE < 0.0:
-            raise Exception("_MAX_SPEED,_MAX_CLIMB_RATE, and _MAX_ROTATION_RATE must be positive")
-        vx = min(max(vx,-_MAX_SPEED), _MAX_SPEED)
-        vy = min(max(vy,-_MAX_SPEED), _MAX_SPEED)
-        wz = min(max(wz,-_MAX_ROTATION_RATE), _MAX_ROTATION_RATE)
-
-        return (vx, vy, wz)
-    
     def timer_callback(self) -> None:
         """Callback function for the timer."""
 
         self.publish_offboard_control_heartbeat_signal()
-        
+
         if self.offboard_setpoint_counter == 10:
             self.engage_offboard_mode()
             self.arm()
 
         self.offboard_setpoint_counter += 1
-    
+
+    def get_ground_plane_distances(self, pixel_u, pixel_v):
+        horizontal_fov_rad = 1.74
+        image_width = 1280
+        image_height = 960
+        camera_height_meters = 3.0
+
+        fx = image_width / (2 * math.tan(horizontal_fov_rad / 2))
+        vertical_fov_rad = 2 * \
+            math.atan(math.tan(horizontal_fov_rad / 2)
+                      * (image_height / image_width))
+        fy = image_height / (2 * math.tan(vertical_fov_rad / 2))
+
+        cx = (image_width - 1) / 2
+        cy = (image_height - 1) / 2
+
+        # These are the horizontal distances on the ground plane
+        # relative to the point directly below the camera.
+        distance_x_on_ground = (pixel_u - cx) * camera_height_meters / fx
+        distance_y_on_ground = (pixel_v - cy) * camera_height_meters / fy
+
+        return distance_x_on_ground, distance_y_on_ground
+
     def line_sub_cb(self, param):
         """
-        Callback function which is called when a new message of type Line is recieved by self.line_sub.
-        Notes:
-        - This is the function that maps a detected line into a velocity 
-        command
-            
-            Args:
-                - param: parameters that define the center and direction of detected line
+        Callback function which is called when a new message of type Line is received by self.line_sub.
         """
-        print("Following line")
+        # Delay line following until drone is near takeoff height
+        altitude = self.vehicle_local_position.z
+        print(f'Altitude: {altitude}')
+        if altitude is None or abs(altitude - self.takeoff_height) > 1:
+            msg = TrajectorySetpoint()
+            msg.position = [0, 0, self.takeoff_height]
+            msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+            self.trajectory_setpoint_publisher.publish(msg)
+            return
+
         # Extract line parameters
         x, y, vx, vy = param.x, param.y, param.vx, param.vy
-        line_point = np.array([x, y])
-        line_dir = np.array([vx, vy])
-        line_dir = line_dir / np.linalg.norm(line_dir)  # Ensure unit vector
+        # line_point = np.array([x, y])
+        # line_dir = np.array([vx, vy])
 
-        # Target point EXTEND pixels ahead along the line direction
-        target = line_point + EXTEND * line_dir
+        # Project a target point far along the detected line
+        # target = line_point + 100 * line_dir
 
-        # Error between center and target
-        error = target - CENTER
+        # d_x, d_y = self.get_ground_plane_distances(*target)
+        
+        if vx == 0 or vy == 0:
+            msg = TrajectorySetpoint()
+            msg.velocity = [0, 0, None]
+            msg.position = [None, None, self.takeoff_height]
+            msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+            self.trajectory_setpoint_publisher.publish(msg)
 
-        # Set linear velocities (downward camera frame)
-        self.vx__dc = KP_X * error[0]
-        self.vy__dc = KP_Y * error[1]
-
-        # Get angle between y-axis and line direction
-        forward = np.array([0.0, 1.0])
-        angle = math.atan2(line_dir[1], line_dir[0])
-        angle_error = math.atan2(forward[1], forward[0]) - angle
-
-        # Set angular velocity (yaw)
-        self.wz__dc = KP_Z_W * angle_error
-        self.publish_trajectory_setpoint(*self.convert_velocity_setpoints())
-
-        """
-        TODO: Implement logic to set a target on the line given a point and tangent vector.
-        TODO: Find the error between the target and the center of the image.
-        TODO: Set linear velocity in the downward camera frame (self.vx__dc, self.vy__dc) based on the error. (hint: use KP_X and KP_Y)
-        TODO: Find the error between the forward direction of the drone and the line direction.
-        TODO: Set angular velocity in the downward camera frame (self.wz__dc) based on the error. (hint: use KP_Z_W)
-        TODO: Convert downward camera frame velocities to body down frame velocities (use self.convert_velocity_setpoints())
-        TODO: Publish the trajectory setpoint with the converted velocities (use self.publish_trajectory_setpoint)
-        """
-
+        vel = np.array([vx, vy, 0])
+        norm = np.linalg.norm(vel)
+        if norm == 0:
+            return
+        vel_norm = vel / norm
+        vel_norm *= _MAX_SPEED
+        
+        print(f'VEL: {vel_norm}')
+                
+        msg = TrajectorySetpoint()
+        msg.velocity = [-vel_norm[0], -vel_norm[1], None]
+        msg.position = [None, None, self.takeoff_height]
+        msg.yaw = math.atan2(y, x)
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        self.trajectory_setpoint_publisher.publish(msg)
+                
 def main(args=None) -> None:
     print('Starting offboard control node...')
     rclpy.init(args=args)
@@ -348,7 +359,6 @@ def main(args=None) -> None:
     rclpy.spin(offboard_control)
     offboard_control.destroy_node()
     rclpy.shutdown()
-
 
 if __name__ == '__main__':
     try:
